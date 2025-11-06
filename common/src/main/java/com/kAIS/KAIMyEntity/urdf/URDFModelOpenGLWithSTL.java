@@ -1,9 +1,11 @@
 package com.kAIS.KAIMyEntity.urdf;
 
+import com.kAIS.KAIMyEntity.renderer.IMMDModel;
 import com.kAIS.KAIMyEntity.urdf.control.URDFMotionEditor;
 import com.kAIS.KAIMyEntity.urdf.control.URDFMotionPlayer;
 import com.kAIS.KAIMyEntity.urdf.control.URDFSimpleController;
-import com.kAIS.KAIMyEntity.renderer.IMMDModel;
+import com.kAIS.KAIMyEntity.vrm.VrmLoader;
+import com.kAIS.KAIMyEntity.vrm.VrmLoader.VrmSkeleton;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
@@ -20,14 +22,16 @@ import org.joml.Vector3f;
 import java.io.File;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
- * URDF 모델 렌더링 (STL 메시 포함)
+ * URDF 모델 렌더링 (STL 메시 포함) + VRM 스켈레톤 오버레이 프리뷰
  *
  * - 루트에서만 업라이트 보정(ROS/STL 좌표 → Minecraft) 1회 적용
  *   · Up을 먼저 정확히 맞추고 → Up에 수직인 평면에서 Forward만 정렬 (롤 꼬임 방지)
  * - 링크/조인트 원점/축은 원본 좌표 기준 (추가 보정 없음)
  * - setJointPreview(...) 즉시 반영 + tickUpdate(...) 컨트롤러 추종
+ * - (옵션) setPreviewSkeleton(...)으로 VRM/GLB 스켈레톤 주입 시, Render/renderToBuffer에서 스틱맨 라인 오버레이
  */
 public class URDFModelOpenGLWithSTL implements IMMDModel {
     private static final Logger logger = LogManager.getLogger();
@@ -63,6 +67,16 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
     private final URDFSimpleController ctrl;
     private final URDFMotionEditor motionEditor;
     private final URDFMotionPlayer motionPlayer = new URDFMotionPlayer();
+
+    // ------------ VRM 스켈레톤 오버레이 ------------
+    private VrmSkeleton vrmSkel; // 원본 스켈레톤(정적)
+    private final Map<String, Pose> vrmLive = new HashMap<>(); // 실시간 포즈(VMC 적용)
+    private float vrmViewScale = 0.01f; // 미터 → 뷰 스케일 (씬에 맞춰 조정)
+
+    private static final class Pose {
+        final Vector3f p = new Vector3f();
+        final Quaternionf q = new Quaternionf();
+    }
 
     public URDFModelOpenGLWithSTL(URDFRobotModel robotModel, String modelDir) {
         this.robotModel = robotModel;
@@ -110,6 +124,8 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
             motionPlayer.update(dt, this::setJointTarget);
         }
         ctrl.update(dt);
+        // VRM 오버레이도 매 프레임 갱신
+        Update(dt);
     }
 
     // ===== 외부 제어용 편의 API =====
@@ -117,17 +133,20 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
     public void setJointTargets(Map<String, Float> values) { ctrl.setTargets(values); }
 
     /** 즉시 반영(프리뷰): 현재 프레임에서 바로 보이게 currentPosition을 덮어씀 */
+    @Override
     public void setJointPreview(String name, float value) {
         URDFJoint j = getJointByName(name);
         if (j != null) {
             j.currentPosition = value;   // 화면 즉시 반영
-            // j.currentVelocity = 0f;
         }
     }
 
     public URDFMotionEditor getMotionEditor() { return motionEditor; }
     public URDFMotionPlayer getMotionPlayer() { return motionPlayer; }
 
+    // ===== IMMDModel 구현 =====
+
+    /** 레거시 경로(이전 렌더러 체인) */
     @Override
     public void Render(Entity entityIn, float entityYaw, float entityPitch,
                        Vector3f entityTrans, float tickDelta, PoseStack poseStack, int packedLight) {
@@ -162,10 +181,83 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
             poseStack.popPose();
         }
 
-        // 필요 시 충돌하면 임시로 주석 처리
+        // VRM 스켈레톤 오버레이 (레거시 경로에서도 보이게)
+        renderVrmOverlay(poseStack, vc, packedLight, 0);
+
         bufferSource.endBatch(RenderType.solid());
         RenderSystem.enableCull();
     }
+
+    /** 새 파이프라인: VertexConsumer 기반 렌더 */
+    @Override
+    public void renderToBuffer(Entity entityIn,
+                               float entityYaw, float entityPitch, Vector3f entityTrans, float tickDelta,
+                               PoseStack pose,
+                               VertexConsumer consumer,
+                               int packedLight,
+                               int overlay) {
+        // 레거시 경로로 기본 URDF 렌더
+        Render(entityIn, entityYaw, entityPitch, entityTrans, tickDelta, pose, packedLight);
+        // VRM 오버레이 (중복 호출 방지 위해 Render에서 그리면 여기선 생략해도 되지만,
+        // 호출 체인에 따라 Render가 생략될 수 있으니 안전하게 한 번 더 시도)
+        renderVrmOverlay(pose, consumer, packedLight, overlay);
+    }
+
+    @Override public void ChangeAnim(long anim, long layer) { }
+    @Override public void ResetPhysics() { logger.info("ResetPhysics called"); }
+    @Override public long GetModelLong() { return 0; }
+    @Override public String GetModelDir() { return modelDir; }
+
+    @Override
+    public Object getRobotModel() { return robotModel; } // 매핑 툴에서 참조
+
+    @Override
+    public void setPreviewSkeleton(Object skeleton) {
+        if (!(skeleton instanceof VrmSkeleton s)) return;
+        this.vrmSkel = s;
+        vrmLive.clear();
+        for (var b : s.bones) {
+            Pose p = new Pose();
+            p.p.set(b.translation);
+            p.q.set(b.rotation);
+            vrmLive.put(b.name, p);
+        }
+        logger.info("[URDF] VRM skeleton set (profile={}, bones={})", s.profile, s.bones.size());
+    }
+
+    @Override
+    public void Update(float deltaTime) {
+        if (vrmSkel == null) return;
+        Object vmc = reflectGetVmcState();
+        if (vmc == null) return;
+        Map<String, Object> map = reflectCollectBoneMap(vmc);
+        for (var e : map.entrySet()) {
+            Pose lp = vrmLive.get(e.getKey());
+            if (lp == null) continue;
+            Object tr = e.getValue();
+            Vector3f pos = readPos(tr);
+            Quaternionf rot = readQuat(tr);
+            if (pos != null) lp.p.set(pos);
+            if (rot != null) lp.q.set(rot);
+        }
+    }
+
+    @Override public void onMappingUpdated(Object mapping) { /* 선택: 필요 시 구현 */ }
+    @Override public void Dispose() { /* 선택: 리소스 해제 */ }
+
+    public static URDFModelOpenGLWithSTL Create(String urdfPath, String modelDir) {
+        File urdfFile = new File(urdfPath);
+        if (!urdfFile.exists()) return null;
+        URDFRobotModel robot = URDFParser.parse(urdfFile);
+        if (robot == null || robot.rootLinkName == null) return null;
+        return new URDFModelOpenGLWithSTL(robot, modelDir);
+    }
+
+    public URDFRobotModel getRobotModel() {
+        return robotModel;
+    }
+
+    // ===== 내부 렌더링 =====
 
     private void renderLinkRecursive(String linkName, PoseStack poseStack, VertexConsumer vc, int packedLight) {
         URDFLink link = robotModel.getLink(linkName);
@@ -305,22 +397,64 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         }
     }
 
-    // ===== IMMDModel 구현 =====
-    @Override public void ChangeAnim(long anim, long layer) { }
-    @Override public void ResetPhysics() { logger.info("ResetPhysics called"); }
-    @Override public long GetModelLong() { return 0; }
-    @Override public String GetModelDir() { return modelDir; }
+    // ===== VRM 오버레이 렌더 =====
 
-    public static URDFModelOpenGLWithSTL Create(String urdfPath, String modelDir) {
-        File urdfFile = new File(urdfPath);
-        if (!urdfFile.exists()) return null;
-        URDFRobotModel robot = URDFParser.parse(urdfFile);
-        if (robot == null || robot.rootLinkName == null) return null;
-        return new URDFModelOpenGLWithSTL(robot, modelDir);
+    private void renderVrmOverlay(PoseStack pose, VertexConsumer vc, int packedLight, int overlay) {
+        if (vrmSkel == null) return;
+
+        pose.pushPose();
+        // URDF 루트에 이미 Q_ROS2MC, GLOBAL_SCALE을 적용했으므로
+        // VRM도 같은 공간에서 보고 싶다면 동일하게 적용해도 됨.
+        // 다만 VMC 좌표계가 이미 월드 기준이면 스케일만 축소 적용.
+        pose.scale(GLOBAL_SCALE * vrmViewScale, GLOBAL_SCALE * vrmViewScale, GLOBAL_SCALE * vrmViewScale);
+
+        Matrix4f m = pose.last().pose();
+
+        int argb = 0xFFFFFFFF; // 흰색 라인
+        int blockLight = (packedLight & 0xFFFF);
+        int skyLight   = (packedLight >> 16) & 0xFFFF;
+
+        for (var b : vrmSkel.bones) {
+            if (b.parentNodeIndex == null) continue;
+            String parent = findParentName(vrmSkel, b);
+            if (parent == null) continue;
+
+            Pose cp = vrmLive.get(b.name);
+            Pose pp = vrmLive.get(parent);
+            if (cp == null || pp == null) continue;
+
+            addSegment(vc, m, pp.p, cp.p, argb, blockLight, skyLight, overlay);
+        }
+
+        pose.popPose();
     }
 
-    public URDFRobotModel getRobotModel() {
-        return robotModel;
+    private static void addSegment(VertexConsumer v, Matrix4f m,
+                                   Vector3f a, Vector3f b, int argb,
+                                   int blockLight, int skyLight, int overlay) {
+        int r=(argb>>16)&255, g=(argb>>8)&255, bl=argb&255, a8=(argb>>>24)&255;
+        float rf=r/255f, gf=g/255f, bf=bl/255f, af=a8/255f;
+
+        // 간단 프리뷰: 두 점만 기록(엔진 라인 셰이프가 없다면 가느다란 리본 구현 권장)
+        v.addVertex(m, a.x, a.y, a.z)
+         .setColor(r, g, bl, a8)
+         .setUv(0.5f, 0.5f)
+         .setUv2(blockLight, skyLight)
+         .setNormal(0, 1, 0);
+
+        v.addVertex(m, b.x, b.y, b.z)
+         .setColor(r, g, bl, a8)
+         .setUv(0.5f, 0.5f)
+         .setUv2(blockLight, skyLight)
+         .setNormal(0, 1, 0);
+    }
+
+    private String findParentName(VrmSkeleton s, VrmLoader.Bone b) {
+        Integer pi = b.parentNodeIndex;
+        if (pi == null) return null;
+        for (var x : s.bones) if (Objects.equals(x.nodeIndex, pi)) return x.name;
+        if (pi >= 0 && pi < s.allNodes.size()) return s.allNodes.get(pi).name;
+        return null;
     }
 
     // ===== 내부 유틸 =====
@@ -393,5 +527,58 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
 
     private static float clamp(float v, float lo, float hi) {
         return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    // ===== VMC 리플렉션 (이미 쓰는 유틸과 동일하게) =====
+
+    private Object reflectGetVmcState() {
+        try {
+            Class<?> mgr = Class.forName("top.fifthlight.armorstand.vmc.VmcMarionetteManager");
+            var getState = mgr.getMethod("getState");
+            return getState.invoke(null);
+        } catch (Throwable ignored) { return null; }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> reflectCollectBoneMap(Object vmcState) {
+        Map<String, Object> out = new HashMap<>();
+        if (vmcState == null) return out;
+        try {
+            var f = vmcState.getClass().getField("boneTransforms");
+            Object raw = f.get(vmcState);
+            if (!(raw instanceof Map<?,?> m)) return out;
+            for (var e : ((Map<Object,Object>)m).entrySet()) {
+                Object tag = e.getKey();
+                String name = tag.toString();
+                try {
+                    var nameM = tag.getClass().getMethod("name");
+                    Object n = nameM.invoke(tag);
+                    if (n != null) name = n.toString();
+                } catch (Throwable ignored) {}
+                out.put(name, e.getValue());
+            }
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
+    private Vector3f readPos(Object tr) {
+        try {
+            Object p = tr.getClass().getField("position").get(tr);
+            float x = (float)p.getClass().getMethod("x").invoke(p);
+            float y = (float)p.getClass().getMethod("y").invoke(p);
+            float z = (float)p.getClass().getMethod("z").invoke(p);
+            return new Vector3f(x,y,z);
+        } catch (Throwable ignored) { return null; }
+    }
+
+    private Quaternionf readQuat(Object tr) {
+        try {
+            Object r = tr.getClass().getField("rotation").get(tr);
+            float x = (float)r.getClass().getMethod("x").invoke(r);
+            float y = (float)r.getClass().getMethod("y").invoke(r);
+            float z = (float)r.getClass().getMethod("z").invoke(r);
+            float w = (float)r.getClass().getMethod("w").invoke(r);
+            return new Quaternionf(x,y,z,w);
+        } catch (Throwable ignored) { return null; }
     }
 }
