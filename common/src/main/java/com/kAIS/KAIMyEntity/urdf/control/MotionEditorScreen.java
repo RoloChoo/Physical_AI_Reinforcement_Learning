@@ -2,7 +2,6 @@ package com.kAIS.KAIMyEntity.urdf.control;
 
 import com.kAIS.KAIMyEntity.urdf.URDFJoint;
 import com.kAIS.KAIMyEntity.urdf.URDFRobotModel;
-import com.kAIS.KAIMyEntity.urdf.URDFModelOpenGLWithSTL;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractSliderButton;
@@ -10,85 +9,314 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * URDF Joint Editor (즉시 적용 전용)
- * - 키프레임/재생 제거
+ * URDF Joint Editor (즉시 적용 전용, 리플렉션 호환)
+ *
  * - 페이지 분할(Prev/Next)
  * - 각 관절 행: [-] 슬라이더 [+]  (리미트 기반 스케일)
  * - 상단: Prev / Next / Page, Reset All
  * - 하단: Exit
  *
  * 요구:
- * - URDFModelOpenGLWithSTL에 getRobotModel(), setJointPreview(name,rad), setJointTarget(name,rad)
- * - ClientTickLoop에서 renderer.tickUpdate(1/20f)
+ * - renderer 객체에 다음 메서드가 존재할 것 (리플렉션으로 호출)
+ *   · getRobotModel(): URDFRobotModel
+ *   · setJointPreview(String name, float rad)
+ *   · setJointTarget(String name, float rad)
+ *
+ * - ClientTickLoop 등에서 renderer.tickUpdate(1/20f) 호출 중일 것
  */
 public class MotionEditorScreen extends Screen {
-    private final URDFModelOpenGLWithSTL renderer;
-    private final List<Row> rows = new ArrayList<>();
+    // === 렌더러는 형식 독립(Object)으로 받고 리플렉션으로 메서드 호출 ===
+    private final Object renderer;
 
+    private final List<Row> rows = new ArrayList<>();
     private int page = 0;
     private final int perPage = 14; // 페이지당 관절 수
 
-    public MotionEditorScreen(URDFModelOpenGLWithSTL renderer) {
+    // 편의: 부모 스크린(있으면 onClose에서 복귀)
+    private final Screen parent;
+
+    /* ----------------- 생성자 ----------------- */
+
+    public MotionEditorScreen(Screen parent, Object renderer) {
         super(Component.literal("URDF Joint Editor"));
+        this.parent = parent;
         this.renderer = renderer;
     }
+
+    /** 이전 코드 호환용: parent 없이 띄우고 싶을 때 */
+    public MotionEditorScreen(Object renderer) {
+        this(null, renderer);
+    }
+
+    /* ----------------- 라이프사이클 ----------------- */
 
     @Override
     protected void init() {
         rebuild();
     }
 
+    /* ----------------- UI 재구성 ----------------- */
+
     private void rebuild() {
         clearWidgets();
         rows.clear();
 
+        // --- 모델 참조 (리플렉션 + 강타입 캐스팅) ---
+        URDFRobotModel model = reflectGetRobotModel(renderer);
+        if (model == null || model.joints == null || model.joints.isEmpty()) {
+            // 모델이 없을 때도 버튼/Exit만은 보이게
+            buildHeaderButtons(0);
+            buildExitButton();
+            return;
+        }
+
+        int total = model.joints.size();
+        buildHeaderButtons(total);
+
+        // ===== 관절 리스트 (현재 페이지) =====
         int headerY = 10;
         int listTop  = 42;
         int leftX    = 20;
 
-        // 안전 캐스팅
-        URDFRobotModel model = (URDFRobotModel) renderer.getRobotModel();
-        if (model == null || model.joints == null) return;
-
-        // ===== 페이지 컨트롤 =====
-        addRenderableWidget(Button.builder(Component.literal("< Prev"), b -> {
-            if (page > 0) { page--; rebuild(); }
-        }).bounds(leftX, headerY, 60, 20).build());
-
-        int total  = model.joints.size();
-        int pages  = Math.max(1, (int)Math.ceil(total / (double)perPage));
-
-        addRenderableWidget(Button.builder(Component.literal("Next >"), b -> {
-            if (page < pages - 1) { page++; rebuild(); }
-        }).bounds(leftX + 66, headerY, 60, 20).build());
-
-        Button pageLabel = Button.builder(Component.literal("Page " + (page+1) + "/" + pages), b -> {})
-                .bounds(leftX + 132, headerY, 90, 20).build();
-        pageLabel.active = false;
-        addRenderableWidget(pageLabel);
-
-        // ===== Reset All =====
-        addRenderableWidget(Button.builder(Component.literal("Reset All"), b -> {
-            for (URDFJoint j : model.joints) {
-                renderer.setJointPreview(j.name, 0f); // 즉시
-                renderer.setJointTarget(j.name, 0f);  // 안정 추종
-            }
-            for (Row r : rows) r.slider.setFromRadians(0f);
-        }).bounds(width - 100, headerY, 80, 20).build());
-
-        // ===== 관절 리스트 (현재 페이지) =====
         int start = page * perPage;
         int end   = Math.min(total, start + perPage);
 
         int y = listTop;
-        List<URDFJoint> joints = model.joints;
 
         for (int i = start; i < end; i++) {
-            URDFJoint j = joints.get(i);
+            URDFJoint j = model.joints.get(i);
 
-            // 리미트 (없으면 -180~180도)
-            float lo = (j.limit != null && j.limit.hasLimits()) ? j.limit.lower : (float)Math.toRadians(-180);
+            // 리미트 계산 (URDF limit 불완전 대비)
+            float lo = (j.limit != null && j.limit.upper > j.limit.lower)
+                    ? (float) j.limit.lower
+                    : (float) Math.toRadians(-180.0);
+            float hi = (j.limit != null && j.limit.upper > j.limit.lower)
+                    ? (float) j.limit.upper
+                    : (float) Math.toRadians( 180.0);
+            if (hi <= lo) {
+                lo = (float) Math.toRadians(-180.0);
+                hi = (float) Math.toRadians( 180.0);
+            }
+
+            final URDFJoint jRef = j;
+            final float loF = lo;
+            final float hiF = hi;
+
+            // [-] 조그
+            addRenderableWidget(
+                Button.builder(Component.literal("-"), b -> {
+                    float step = (float) Math.toRadians(2.0);
+                    float v = clamp(jRef.currentPosition - step, loF, hiF);
+                    reflectSetJointPreview(renderer, jRef.name, v);
+                    reflectSetJointTarget(renderer, jRef.name, v);
+                    syncRow(jRef.name, v);
+                }).bounds(leftX, y, 20, 20).build()
+            );
+
+            // 슬라이더
+            JointSlider slider = new JointSlider(
+                leftX + 24, y, 260, 20,
+                jRef.name, jRef.currentPosition, loF, hiF, renderer
+            );
+            rows.add(new Row(jRef.name, slider));
+            addRenderableWidget(slider);
+
+            // [+] 조그
+            addRenderableWidget(
+                Button.builder(Component.literal("+"), b -> {
+                    float step = (float) Math.toRadians(2.0);
+                    float v = clamp(jRef.currentPosition + step, loF, hiF);
+                    reflectSetJointPreview(renderer, jRef.name, v);
+                    reflectSetJointTarget(renderer, jRef.name, v);
+                    syncRow(jRef.name, v);
+                }).bounds(leftX + 288, y, 20, 20).build()
+            );
+
+            y += 24;
+        }
+
+        buildExitButton();
+    }
+
+    private void buildHeaderButtons(int totalJoints) {
+        int headerY = 10;
+        int leftX   = 20;
+
+        int pages  = Math.max(1, (int) Math.ceil(totalJoints / (double) perPage));
+        page = Math.min(page, pages - 1);
+        page = Math.max(page, 0);
+
+        // < Prev
+        addRenderableWidget(
+            Button.builder(Component.literal("< Prev"), b -> {
+                if (page > 0) { page--; rebuild(); }
+            }).bounds(leftX, headerY, 60, 20).build()
+        );
+
+        // Next >
+        addRenderableWidget(
+            Button.builder(Component.literal("Next >"), b -> {
+                if (page < pages - 1) { page++; rebuild(); }
+            }).bounds(leftX + 66, headerY, 60, 20).build()
+        );
+
+        // Page n/N (inactive)
+        Button pageLabel = Button.builder(Component.literal("Page " + (page + 1) + "/" + pages), b -> {})
+            .bounds(leftX + 132, headerY, 90, 20).build();
+        pageLabel.active = false;
+        addRenderableWidget(pageLabel);
+
+        // Reset All
+        addRenderableWidget(
+            Button.builder(Component.literal("Reset All"), b -> {
+                URDFRobotModel model = reflectGetRobotModel(renderer);
+                if (model != null && model.joints != null) {
+                    for (URDFJoint j : model.joints) {
+                        reflectSetJointPreview(renderer, j.name, 0f); // 즉시
+                        reflectSetJointTarget(renderer, j.name, 0f);  // 안정 추종
+                    }
+                }
+                for (Row r : rows) r.slider.setFromRadians(0f);
+            }).bounds(width - 100, headerY, 80, 20).build()
+        );
+    }
+
+    private void buildExitButton() {
+        addRenderableWidget(
+            Button.builder(Component.literal("Exit"), b -> {
+                if (parent != null) {
+                    minecraft.setScreen(parent);
+                } else {
+                    Minecraft.getInstance().setScreen(null);
+                }
+            }).bounds(width - 70, height - 30, 50, 20).build()
+        );
+    }
+
+    /* ----------------- 렌더 ----------------- */
+
+    @Override
+    public void render(GuiGraphics g, int mouseX, int mouseY, float partialTicks) {
+        renderBackground(g, mouseX, mouseY, partialTicks);
+        super.render(g, mouseX, mouseY, partialTicks);
+        g.drawCenteredString(font, "URDF Joint Editor (Immediate)", width / 2, 2, 0xFFFFFF);
+    }
+
+    /* ----------------- 동기화 유틸 ----------------- */
+
+    private void syncRow(String jointName, float radians) {
+        for (Row r : rows) {
+            if (r.jointName.equals(jointName)) {
+                r.slider.setFromRadians(radians);
+                break;
+            }
+        }
+    }
+
+    /* ----------------- 내부 구조 ----------------- */
+
+    private record Row(String jointName, JointSlider slider) {}
+
+    private static class JointSlider extends AbstractSliderButton {
+        private final String jointName;
+        private final Object renderer;
+        private final float lo, hi;
+
+        /** current(rad)를 lo..hi 기준 0..1로 정규화하여 초기화 */
+        public JointSlider(int x, int y, int w, int h,
+                           String jointName, float currentRad, float lo, float hi,
+                           Object renderer) {
+            super(x, y, w, h, Component.literal(""), normalize(currentRad, lo, hi));
+            this.jointName = jointName;
+            this.renderer = renderer;
+            this.lo = lo;
+            this.hi = hi;
+            updateMessage();
+        }
+
+        @Override
+        protected void updateMessage() {
+            float rad = denorm((float) value);
+            int deg = Math.round((float) Math.toDegrees(rad));
+            setMessage(Component.literal(jointName + ": " + deg + "°"));
+        }
+
+        @Override
+        protected void applyValue() {
+            float rad = denorm((float) value);
+            reflectSetJointPreview(renderer, jointName, rad); // 즉시 화면 반영
+            reflectSetJointTarget(renderer, jointName, rad);  // 틱에서 안정 추종
+        }
+
+        @Override
+        public boolean mouseDragged(double mx, double my, int button, double dx, double dy) {
+            boolean r = super.mouseDragged(mx, my, button, dx, dy);
+            float rad = denorm((float) value);
+            reflectSetJointPreview(renderer, jointName, rad); // 드래그 중 매 프레임
+            reflectSetJointTarget(renderer, jointName, rad);  // 드래그 중에도 target 동기화
+            return r;
+        }
+
+        /** 외부에서 라디안으로 동기화(조그/리셋) */
+        public void setFromRadians(float rad) {
+            this.value = normalize(rad, lo, hi);
+            updateMessage();
+        }
+
+        private float denorm(float v01) { return lo + v01 * (hi - lo); }
+        private static float normalize(float v, float lo, float hi) {
+            if (hi - lo <= 1e-6f) return 0.5f;
+            float t = (v - lo) / (hi - lo);
+            return t < 0 ? 0 : Math.min(1, t);
+        }
+    }
+
+    /* ----------------- 리플렉션 유틸 ----------------- */
+
+    private static URDFRobotModel reflectGetRobotModel(Object rend) {
+        if (rend == null) return null;
+        try {
+            Method m = rend.getClass().getMethod("getRobotModel");
+            Object o = m.invoke(rend);
+            return (o instanceof URDFRobotModel) ? (URDFRobotModel) o : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void reflectSetJointPreview(Object rend, String name, float rad) {
+        if (rend == null || name == null) return;
+        try {
+            Method m = rend.getClass().getMethod("setJointPreview", String.class, float.class);
+            m.invoke(rend, name, rad);
+        } catch (Throwable ignored) { }
+    }
+
+    private static void reflectSetJointTarget(Object rend, String name, float rad) {
+        if (rend == null || name == null) return;
+        try {
+            Method m = rend.getClass().getMethod("setJointTarget", String.class, float.class);
+            m.invoke(rend, name, rad);
+        } catch (Throwable ignored) { }
+    }
+
+    /* ----------------- 유틸 ----------------- */
+
+    private static float clamp(float v, float lo, float hi) {
+        return v < lo ? lo : Math.min(hi, v);
+    }
+
+    @Override
+    public void onClose() {
+        if (parent != null) {
+            minecraft.setScreen(parent);
+        } else {
+            super.onClose();
+        }
+    }
+}
