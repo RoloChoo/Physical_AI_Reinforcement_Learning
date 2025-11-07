@@ -20,18 +20,15 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.io.File;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * URDF 모델 렌더링 (STL 메시 포함) + VRM 스켈레톤 오버레이 프리뷰
  *
  * - 루트에서만 업라이트 보정(ROS/STL 좌표 → Minecraft) 1회 적용
- *   · Up을 먼저 정확히 맞추고 → Up에 수직인 평면에서 Forward만 정렬 (롤 꼬임 방지)
- * - 링크/조인트 원점/축은 원본 좌표 기준 (추가 보정 없음)
  * - setJointPreview(...) 즉시 반영 + tickUpdate(...) 컨트롤러 추종
- * - (옵션) setPreviewSkeleton(...)으로 VRM/GLB 스켈레톤 주입 시, Render/renderToBuffer에서 스틱맨 라인 오버레이
+ * - setPreviewSkeleton(...) 주입 시 VRM 스켈레톤 라인 오버레이
+ * - VRM도 URDF와 동일한 루트 변환을 적용하여 화면 중앙에서 정확히 겹쳐 보이도록 수정
  */
 public class URDFModelOpenGLWithSTL implements IMMDModel {
     private static final Logger logger = LogManager.getLogger();
@@ -50,7 +47,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
     private static final boolean FLIP_NORMALS = true;
 
     // ------------ 업라이트 보정 설정 ------------
-    /** URDF/STL 소스 좌표계 가정 (필요하면 아래 둘만 바꿔서 테스트) */
+    /** URDF/STL 소스 좌표계 가정 */
     private static final Vector3f SRC_UP  = new Vector3f(0, 0, 1); // 보통 Z-up
     private static final Vector3f SRC_FWD = new Vector3f(1, 0, 0); // 보통 +X forward
 
@@ -69,9 +66,14 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
     private final URDFMotionPlayer motionPlayer = new URDFMotionPlayer();
 
     // ------------ VRM 스켈레톤 오버레이 ------------
-    private VrmSkeleton vrmSkel; // 원본 스켈레톤(정적)
+    private VrmSkeleton vrmSkel;                        // 원본 스켈레톤(정적)
     private final Map<String, Pose> vrmLive = new HashMap<>(); // 실시간 포즈(VMC 적용)
-    private float vrmViewScale = 0.01f; // 미터 → 뷰 스케일 (씬에 맞춰 조정)
+
+    // 겹치기 보정 파라미터
+    private float vrmViewScale = 1.0f;                  // 최종 미세 스케일 (GLOBAL_SCALE 적용 후 곱해짐)
+    private String vrmRootBoneName = "hips";            // 중앙 정렬 기준 본
+    private final Vector3f vrmRootCenter = new Vector3f(); // 루트 위치를 원점으로 이동시키기 위한 오프셋
+    private boolean vrmCenterOnRoot = true;             // true면 루트 위치를 (0,0,0)에 정렬
 
     private static final class Pose {
         final Vector3f p = new Vector3f();
@@ -144,6 +146,25 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
     public URDFMotionEditor getMotionEditor() { return motionEditor; }
     public URDFMotionPlayer getMotionPlayer() { return motionPlayer; }
 
+    // (선택) VRM 보정 파라미터 세터
+    public void setVrmViewScale(float s) { this.vrmViewScale = Math.max(1e-4f, s); }
+    public void setVrmRootBoneName(String name) { if (name != null) this.vrmRootBoneName = name; }
+    public void setVrmCenterOnRoot(boolean enabled) { this.vrmCenterOnRoot = enabled; }
+
+    // (선택) 본 이름 목록 제공 — UI가 필요할 때 사용
+    public List<String> getVrmBones() {
+        if (!vrmLive.isEmpty()) return new ArrayList<>(vrmLive.keySet());
+        return Collections.emptyList();
+    }
+    public List<String> getVrmSkeletonBones() {
+        if (vrmSkel != null && vrmSkel.bones != null && !vrmSkel.bones.isEmpty()) {
+            ArrayList<String> names = new ArrayList<>();
+            for (var b : vrmSkel.bones) names.add(b.name);
+            return names;
+        }
+        return Collections.emptyList();
+    }
+
     // ===== IMMDModel 구현 =====
 
     /** 레거시 경로(이전 렌더러 체인) */
@@ -181,7 +202,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
             poseStack.popPose();
         }
 
-        // VRM 스켈레톤 오버레이 (레거시 경로에서도 보이게)
+        // VRM 스켈레톤 오버레이
         renderVrmOverlay(poseStack, vc, packedLight, 0);
 
         bufferSource.endBatch(RenderType.solid());
@@ -198,8 +219,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
                                int overlay) {
         // 레거시 경로로 기본 URDF 렌더
         Render(entityIn, entityYaw, entityPitch, entityTrans, tickDelta, pose, packedLight);
-        // VRM 오버레이 (중복 호출 방지 위해 Render에서 그리면 여기선 생략해도 되지만,
-        // 호출 체인에 따라 Render가 생략될 수 있으니 안전하게 한 번 더 시도)
+        // VRM 오버레이 (중복 호출 방지 위해 Render에서 그리면 여기선 생략해도 되지만 안전하게 호출)
         renderVrmOverlay(pose, consumer, packedLight, overlay);
     }
 
@@ -223,6 +243,21 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
             vrmLive.put(b.name, p);
         }
         logger.info("[URDF] VRM skeleton set (profile={}, bones={})", s.profile, s.bones.size());
+
+        // hips(루트 본) 기준 중심 잡기
+        if (vrmCenterOnRoot) {
+            Pose root = vrmLive.get(vrmRootBoneName);
+            if (root != null) {
+                vrmRootCenter.set(root.p);
+            } else {
+                vrmRootCenter.set(0, 0, 0);
+            }
+        } else {
+            vrmRootCenter.set(0, 0, 0);
+        }
+
+        // 보기 편하도록 기본 스케일 보정
+        if (vrmViewScale <= 0.0f) vrmViewScale = 0.01f;
     }
 
     @Override
@@ -242,7 +277,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         }
     }
 
-    @Override public void onMappingUpdated(Object mapping) { /* 선택: 필요 시 구현 */ }
+    @Override public void onMappingUpdated(Object mapping) { /* 필요 시 구현 */ }
     @Override public void Dispose() { /* 선택: 리소스 해제 */ }
 
     public static URDFModelOpenGLWithSTL Create(String urdfPath, String modelDir) {
@@ -252,7 +287,6 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         if (robot == null || robot.rootLinkName == null) return null;
         return new URDFModelOpenGLWithSTL(robot, modelDir);
     }
-
 
     // ===== 내부 렌더링 =====
 
@@ -400,10 +434,18 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         if (vrmSkel == null) return;
 
         pose.pushPose();
-        // URDF 루트에 이미 Q_ROS2MC, GLOBAL_SCALE을 적용했으므로
-        // VRM도 같은 공간에서 보고 싶다면 동일하게 적용해도 됨.
-        // 다만 VMC 좌표계가 이미 월드 기준이면 스케일만 축소 적용.
-        pose.scale(GLOBAL_SCALE * vrmViewScale, GLOBAL_SCALE * vrmViewScale, GLOBAL_SCALE * vrmViewScale);
+
+        // ✅ URDF 루트와 동일한 루트 변환 적용: (1) 스케일 → (2) 업라이트 보정
+        pose.scale(GLOBAL_SCALE, GLOBAL_SCALE, GLOBAL_SCALE);
+        pose.mulPose(new Quaternionf(Q_ROS2MC));
+
+        // ✅ hips(루트 본) 기준 중앙 정렬
+        if (vrmCenterOnRoot) {
+            pose.translate(-vrmRootCenter.x, -vrmRootCenter.y, -vrmRootCenter.z);
+        }
+
+        // ✅ 최종 미세 스케일
+        pose.scale(vrmViewScale, vrmViewScale, vrmViewScale);
 
         Matrix4f m = pose.last().pose();
 
@@ -430,9 +472,8 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
                                    Vector3f a, Vector3f b, int argb,
                                    int blockLight, int skyLight, int overlay) {
         int r=(argb>>16)&255, g=(argb>>8)&255, bl=argb&255, a8=(argb>>>24)&255;
-        float rf=r/255f, gf=g/255f, bf=bl/255f, af=a8/255f;
 
-        // 간단 프리뷰: 두 점만 기록(엔진 라인 셰이프가 없다면 가느다란 리본 구현 권장)
+        // 간단 라인(두 점만) — 엔진 기본 라인 없으면 리본/박스 라인으로 대체 권장
         v.addVertex(m, a.x, a.y, a.z)
          .setColor(r, g, bl, a8)
          .setUv(0.5f, 0.5f)
@@ -526,7 +567,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
-    // ===== VMC 리플렉션 (이미 쓰는 유틸과 동일하게) =====
+    // ===== VMC 리플렉션 =====
 
     private Object reflectGetVmcState() {
         try {
