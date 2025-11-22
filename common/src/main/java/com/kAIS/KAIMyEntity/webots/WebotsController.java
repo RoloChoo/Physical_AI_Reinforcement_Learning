@@ -112,26 +112,59 @@ public class WebotsController {
         LOGGER.info("✅ WebotsController initialized: {}", webotsUrl);
     }
 
+    /**
+     * ✅ 개선: WebotsConfigScreen.Config에서 기본값 로드
+     */
     public static WebotsController getInstance() {
         if (instance == null) {
-            instance = new WebotsController("localhost", 8080);
+            // WebotsConfigScreen.Config에서 마지막 저장된 IP/Port 가져오기
+            try {
+                WebotsConfigScreen.Config config = WebotsConfigScreen.Config.getInstance();
+                instance = new WebotsController(config.getLastIp(), config.getLastPort());
+            } catch (Exception e) {
+                // Config 로드 실패 시 기본값 사용
+                LOGGER.warn("Failed to load config, using defaults", e);
+                instance = new WebotsController("localhost", 8080);
+            }
         }
         return instance;
     }
 
+    /**
+     * ✅ 개선: Config 저장 포함
+     */
     public static WebotsController getInstance(String ip, int port) {
         if (instance != null) {
             if (!instance.robotIp.equals(ip) || instance.robotPort != port) {
                 LOGGER.info("🔄 Recreating WebotsController with new address: {}:{}", ip, port);
                 instance.shutdown();
                 instance = new WebotsController(ip, port);
+                
+                // ✅ Config에 저장
+                try {
+                    WebotsConfigScreen.Config config = WebotsConfigScreen.Config.getInstance();
+                    config.update(ip, port);
+                } catch (Exception e) {
+                    LOGGER.warn("Failed to save config", e);
+                }
             }
         } else {
             instance = new WebotsController(ip, port);
+            
+            // ✅ Config에 저장
+            try {
+                WebotsConfigScreen.Config config = WebotsConfigScreen.Config.getInstance();
+                config.update(ip, port);
+            } catch (Exception e) {
+                LOGGER.warn("Failed to save config", e);
+            }
         }
         return instance;
     }
 
+    /**
+     * ✅ 개선: Config 저장 포함
+     */
     public void reconnect(String ip, int port) {
         LOGGER.info("🔄 Reconnecting to {}:{}", ip, port);
         this.robotIp = ip;
@@ -144,6 +177,14 @@ public class WebotsController {
         lastSent.clear();
 
         testConnection();
+        
+        // ✅ Config에 저장
+        try {
+            WebotsConfigScreen.Config config = WebotsConfigScreen.Config.getInstance();
+            config.update(ip, port);
+        } catch (Exception e) {
+            LOGGER.warn("Failed to save config", e);
+        }
     }
 
     private void testConnection() {
