@@ -33,7 +33,7 @@ public class WebotsController {
 
     private final Stats stats = new Stats();
 
-    // ==================== 최종 정답 JOINT_MAP (2025-11-21 기준) ====================
+    // ==================== ✅ 수정: 충돌 방지를 위한 JOINT_MAP ====================
     private static final Map<String, JointMapping> JOINT_MAP = new HashMap<>();
 
     static {
@@ -41,14 +41,14 @@ public class WebotsController {
         JOINT_MAP.put("head_pan",  new JointMapping("Neck",  18, -1.57f,  1.57f));
         JOINT_MAP.put("head_tilt", new JointMapping("Head",  19, -0.52f,  0.52f));
 
-        // 오른쪽 팔
+        // ✅ 오른쪽 팔 - 충돌 방지를 위한 안전 범위
         JOINT_MAP.put("r_sho_pitch", new JointMapping("ShoulderR", 0, -1.57f,  0.52f));
-        JOINT_MAP.put("r_sho_roll",  new JointMapping("ArmUpperR", 2, -0.68f,  2.30f));
+        JOINT_MAP.put("r_sho_roll",  new JointMapping("ArmUpperR", 2, -0.15f,  2.30f));  // ✅ -0.68 → -0.15
         JOINT_MAP.put("r_el",        new JointMapping("ArmLowerR", 4, -1.57f, -0.10f));
 
-        // 왼쪽 팔
+        // ✅ 왼쪽 팔 - 대칭 처리
         JOINT_MAP.put("l_sho_pitch", new JointMapping("ShoulderL", 1, -1.57f,  0.52f));
-        JOINT_MAP.put("l_sho_roll",  new JointMapping("ArmUpperL", 3, -2.25f,  0.77f));
+        JOINT_MAP.put("l_sho_roll",  new JointMapping("ArmUpperL", 3, -2.25f,  0.15f));  // ✅ 0.77 → 0.15
         JOINT_MAP.put("l_el",        new JointMapping("ArmLowerL", 5, -1.57f, -0.10f));
 
         // 골반
@@ -74,8 +74,8 @@ public class WebotsController {
         // 역호환용 Webots 이름
         JOINT_MAP.put("ShoulderR", new JointMapping("ShoulderR", 0, -1.57f, 0.52f));
         JOINT_MAP.put("ShoulderL", new JointMapping("ShoulderL", 1, -1.57f, 0.52f));
-        JOINT_MAP.put("ArmUpperR", new JointMapping("ArmUpperR", 2, -0.68f, 2.30f));
-        JOINT_MAP.put("ArmUpperL", new JointMapping("ArmUpperL", 3, -2.25f, 0.77f));
+        JOINT_MAP.put("ArmUpperR", new JointMapping("ArmUpperR", 2, -0.15f, 2.30f));  // ✅ 수정
+        JOINT_MAP.put("ArmUpperL", new JointMapping("ArmUpperL", 3, -2.25f, 0.15f));  // ✅ 수정
         JOINT_MAP.put("ArmLowerR", new JointMapping("ArmLowerR", 4, -1.57f, -0.10f));
         JOINT_MAP.put("ArmLowerL", new JointMapping("ArmLowerL", 5, -1.57f, -0.10f));
         JOINT_MAP.put("Neck",      new JointMapping("Neck",      18, -1.57f, 1.57f));
@@ -412,12 +412,16 @@ public class WebotsController {
         return mapping != null ? mapping.index : null;
     }
 
-    // ====================== URDF → Webots 변환기 (여기가 진짜 정답) ======================
+    // ====================== URDF → Webots 변환기 ======================
     private float convertUrdfToWebots(String jointName, float urdfValue) {
         return switch (jointName) {
-            // 팔꿈치 (가장 큰 문제였던 부분)
-            case "r_el" -> map(urdfValue, 0.0f, 2.7925f, -0.10f, -1.57f);   // 양수 → 음수 반전
-            case "l_el" -> map(urdfValue, -2.7925f, 0.0f, -1.57f, -0.10f); // 음수 → 음수
+            // 팔꿈치 (기본 설정)
+            case "r_el" -> map(urdfValue, 0.0f, 2.7925f, -0.10f, -1.57f);
+            case "l_el" -> map(urdfValue, -2.7925f, 0.0f, -1.57f, -0.10f);
+
+            // ⚠️ 만약 위 설정으로도 팔이 반대로 꺾인다면, 아래 주석을 해제하고 위 2줄을 주석 처리하세요:
+            // case "r_el" -> map(urdfValue, 0.0f, 2.7925f, -1.57f, -0.10f);
+            // case "l_el" -> map(urdfValue, -2.7925f, 0.0f, -0.10f, -1.57f);
 
             // 무릎 (역방향)
             case "r_knee", "l_knee" -> map(urdfValue, -2.27f, 0.0f, 2.09f, -0.1f);
