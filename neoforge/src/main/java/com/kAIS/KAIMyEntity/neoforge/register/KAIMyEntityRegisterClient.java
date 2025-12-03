@@ -8,6 +8,8 @@ import com.kAIS.KAIMyEntity.neoforge.ClientTickLoop;
 import com.kAIS.KAIMyEntity.urdf.URDFModelOpenGLWithSTL;
 import com.kAIS.KAIMyEntity.urdf.control.MotionEditorScreen;
 import com.kAIS.KAIMyEntity.urdf.control.VMCListenerController;
+import com.kAIS.KAIMyEntity.urdf.control.URDFMotion;
+import com.kAIS.KAIMyEntity.urdf.vmd.VMDLoader;  // ✅ 올바른 import 경로
 import com.kAIS.KAIMyEntity.webots.WebotsController;
 import com.kAIS.KAIMyEntity.webots.WebotsConfigScreen;
 
@@ -42,6 +44,7 @@ import java.util.Objects;
  * - Ctrl+G: URDF 리로드 + 자동 로드 시도
  * - H: 물리 리셋
  * - K: VMC 매핑 에디터 열기
+ * - L: VMD 파일 로드 (./KAIMyEntity/dance.vmd)
  * - T: Webots 통계 출력 (디버깅용)
  * - Y: Webots T-Pose 테스트
  * - U: Webots 설정 GUI
@@ -58,6 +61,7 @@ public class KAIMyEntityRegisterClient {
     static KeyMapping keyMotionGuiOrReload = new KeyMapping("key.motionGuiOrReload", KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_G, "key.title");
     static KeyMapping keyOpenVmcMapping    = new KeyMapping("key.openVmcMapping",  KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_K, "key.title");
     static KeyMapping keyResetPhysics      = new KeyMapping("key.resetPhysics",    KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_H, "key.title");
+    static KeyMapping keyLoadVMD           = new KeyMapping("key.loadVMD",         KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_L, "key.title");
     static KeyMapping keyWebotsStats       = new KeyMapping("key.webotsStats",     KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_T, "key.title");
     static KeyMapping keyWebotsTest        = new KeyMapping("key.webotsTest",      KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_Y, "key.title");
     static KeyMapping keyWebotsConfig      = new KeyMapping("key.webotsConfig",    KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_U, "key.title");
@@ -72,6 +76,7 @@ public class KAIMyEntityRegisterClient {
         e.register(keyMotionGuiOrReload);
         e.register(keyOpenVmcMapping);
         e.register(keyResetPhysics);
+        e.register(keyLoadVMD);
         e.register(keyWebotsStats);
         e.register(keyWebotsTest);
         e.register(keyWebotsConfig);
@@ -146,6 +151,11 @@ class KAIMyEntityKeyHandler {
             }
         }
 
+        // ==== L: VMD 파일 로드 ====
+        if (KAIMyEntityRegisterClient.keyLoadVMD.consumeClick()) {
+            handleVMDLoad(MC);
+        }
+
         // ==== T: Webots 통계 출력 ====
         if (KAIMyEntityRegisterClient.keyWebotsStats.consumeClick()) {
             try {
@@ -183,18 +193,78 @@ class KAIMyEntityKeyHandler {
                 new com.kAIS.KAIMyEntity.neoforge.network.KAIMyEntityNetworkPack(1, player.getGameProfile(), index));
     }
 
+    // === VMD 파일 로드 처리 ===
+    private static void handleVMDLoad(Minecraft mc) {
+        try {
+            // 렌더러 확인
+            if (ClientTickLoop.renderer == null) {
+                ensureActiveRenderer(mc);
+                if (ClientTickLoop.renderer == null) {
+                    mc.gui.getChat().addMessage(Component.literal("§c[VMD] No active URDF renderer. Load a .urdf file first (press G)."));
+                    return;
+                }
+            }
+
+            // VMD 파일 찾기
+            File gameDir = mc.gameDirectory;
+            File vmdFile = new File(gameDir, "KAIMyEntity/dance.vmd");
+            
+            if (!vmdFile.exists()) {
+                // KAIMyEntity 폴더가 없으면 생성
+                File kaiDir = new File(gameDir, "KAIMyEntity");
+                if (!kaiDir.exists()) {
+                    kaiDir.mkdirs();
+                }
+                mc.gui.getChat().addMessage(Component.literal("§e[VMD] File not found. Put 'dance.vmd' in ./KAIMyEntity/"));
+                logger.info("VMD file not found at: {}", vmdFile.getAbsolutePath());
+                return;
+            }
+
+            // VMD 로드
+            URDFMotion motion = VMDLoader.load(vmdFile);
+            if (motion == null) {
+                mc.gui.getChat().addMessage(Component.literal("§c[VMD] Failed to parse file: " + vmdFile.getName()));
+                return;
+            }
+
+            // 모션 재생 (렌더러에 적용하는 방식은 프로젝트 구조에 따라 다를 수 있음)
+            // 방법 1: 렌더러에 직접 모션 설정
+            try {
+                // ClientTickLoop.renderer.setMotion(motion); // 이런 메서드가 있다면
+                // 또는
+                // ClientTickLoop.renderer.getMotionPlayer().load(motion);
+                // ClientTickLoop.renderer.getMotionPlayer().play();
+                
+                // 일단 로드 성공 메시지만 표시
+                mc.gui.getChat().addMessage(Component.literal("§a✓ VMD loaded: " + vmdFile.getName() + " (" + motion.keys.size() + " keyframes)"));
+                logger.info("VMD loaded successfully: {} with {} keyframes", vmdFile.getName(), motion.keys.size());
+                
+                // TODO: 실제 모션 재생 로직은 URDFModelOpenGLWithSTL의 API에 따라 구현 필요
+                mc.gui.getChat().addMessage(Component.literal("§e[VMD] Motion playback API not yet connected"));
+                
+            } catch (Exception e) {
+                mc.gui.getChat().addMessage(Component.literal("§c[VMD] Playback failed: " + e.getMessage()));
+                logger.error("VMD playback error", e);
+            }
+            
+        } catch (Exception e) {
+            mc.gui.getChat().addMessage(Component.literal("§c[VMD] Error: " + e.getMessage()));
+            logger.error("VMD load error", e);
+        }
+    }
+
     // === Webots 연결 테스트 (T-Pose) ===
     private static void testWebotsConnection(Minecraft mc) {
         try {
             var webots = WebotsController.getInstance();
             
             // T-Pose 자세 전송
-            webots.setJoint("r_sho_pitch", 0.3f);   // 오른쪽 어깨 앞으로 약간
-            webots.setJoint("r_sho_roll", 1.57f);   // 오른팔 벌리기 (90도)
-            webots.setJoint("r_el", -0.1f);         // 팔꿈치 살짝 구부림
+            webots.setJoint("r_sho_pitch", 0.3f);
+            webots.setJoint("r_sho_roll", 1.57f);
+            webots.setJoint("r_el", -0.1f);
             
-            webots.setJoint("l_sho_pitch", 0.3f);   // 왼쪽 어깨
-            webots.setJoint("l_sho_roll", -1.57f);  // 왼팔 벌리기
+            webots.setJoint("l_sho_pitch", 0.3f);
+            webots.setJoint("l_sho_roll", -1.57f);
             webots.setJoint("l_el", -0.1f);
             
             mc.gui.getChat().addMessage(Component.literal("§a[Webots] T-Pose sent! Check Webots simulation."));
