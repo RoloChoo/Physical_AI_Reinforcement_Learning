@@ -9,7 +9,7 @@ import com.kAIS.KAIMyEntity.urdf.URDFModelOpenGLWithSTL;
 import com.kAIS.KAIMyEntity.urdf.control.MotionEditorScreen;
 import com.kAIS.KAIMyEntity.urdf.control.VMCListenerController;
 import com.kAIS.KAIMyEntity.webots.WebotsController;
-import com.kAIS.KAIMyEntity.webots.WebotsConfigScreen; // ✅ 추가
+import com.kAIS.KAIMyEntity.webots.WebotsConfigScreen;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
@@ -44,9 +44,9 @@ import java.util.Objects;
  * - K: VMC 매핑 에디터 열기
  * - T: Webots 통계 출력 (디버깅용)
  * - Y: Webots T-Pose 테스트
- * - U: Webots 설정 GUI ✅ 추가
+ * - U: Webots 설정 GUI
  */
-@EventBusSubscriber(value = Dist.CLIENT)
+@EventBusSubscriber(modid = "kaimyentity", bus = EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
 public class KAIMyEntityRegisterClient {
     static final Logger logger = LogManager.getLogger();
 
@@ -60,9 +60,9 @@ public class KAIMyEntityRegisterClient {
     static KeyMapping keyResetPhysics      = new KeyMapping("key.resetPhysics",    KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_H, "key.title");
     static KeyMapping keyWebotsStats       = new KeyMapping("key.webotsStats",     KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_T, "key.title");
     static KeyMapping keyWebotsTest        = new KeyMapping("key.webotsTest",      KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_Y, "key.title");
-    static KeyMapping keyWebotsConfig      = new KeyMapping("key.webotsConfig",    KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_U, "key.title"); // ✅ 추가
+    static KeyMapping keyWebotsConfig      = new KeyMapping("key.webotsConfig",    KeyConflictContext.IN_GAME, KeyModifier.NONE, InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_U, "key.title");
 
-    // === 키 등록 ===
+    // === 키 등록 (MOD BUS 이벤트) ===
     @SubscribeEvent
     public static void onRegisterKeyMappings(RegisterKeyMappingsEvent e) {
         e.register(keyCustomAnim1);
@@ -74,7 +74,7 @@ public class KAIMyEntityRegisterClient {
         e.register(keyResetPhysics);
         e.register(keyWebotsStats);
         e.register(keyWebotsTest);
-        e.register(keyWebotsConfig);  // ✅ 추가
+        e.register(keyWebotsConfig);
         logger.info("KAIMyEntityRegisterClient: key mappings registered.");
     }
 
@@ -82,6 +82,12 @@ public class KAIMyEntityRegisterClient {
     public static void Register() {
         logger.info("KAIMyEntityRegisterClient.Register() called (no-op, use event-based registration).");
     }
+}
+
+// === 키 입력 처리는 별도 클래스로 분리 (FORGE BUS) ===
+@EventBusSubscriber(modid = "kaimyentity", bus = EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
+class KAIMyEntityKeyHandler {
+    private static final Logger logger = LogManager.getLogger();
 
     @OnlyIn(Dist.CLIENT)
     @SubscribeEvent
@@ -94,7 +100,7 @@ public class KAIMyEntityRegisterClient {
         handleCustomAnim(player);
 
         // ==== G: 조인트 에디터 / Ctrl+G: 리로드 ====
-        if (keyMotionGuiOrReload.consumeClick()) {
+        if (KAIMyEntityRegisterClient.keyMotionGuiOrReload.consumeClick()) {
             long win = MC.getWindow().getWindow();
             boolean ctrl = org.lwjgl.glfw.GLFW.glfwGetKey(win, GLFW.GLFW_KEY_LEFT_CONTROL)  == GLFW.GLFW_PRESS
                     || org.lwjgl.glfw.GLFW.glfwGetKey(win, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
@@ -120,7 +126,7 @@ public class KAIMyEntityRegisterClient {
         }
 
         // ==== K: VMC 매핑 에디터 열기 ====
-        if (keyOpenVmcMapping.consumeClick()) {
+        if (KAIMyEntityRegisterClient.keyOpenVmcMapping.consumeClick()) {
             if (ClientTickLoop.renderer == null) ensureActiveRenderer(MC);
             if (ClientTickLoop.renderer != null) {
                 MC.setScreen(new VMCListenerController(MC.screen, ClientTickLoop.renderer));
@@ -130,7 +136,7 @@ public class KAIMyEntityRegisterClient {
         }
 
         // ==== H: 물리 리셋 ====
-        if (keyResetPhysics.isDown()) {
+        if (KAIMyEntityRegisterClient.keyResetPhysics.isDown()) {
             var m = MMDModelManager.GetModel("EntityPlayer_" + player.getName().getString());
             if (m != null) {
                 KAIMyEntityRendererPlayerHelper.ResetPhysics(player);
@@ -141,7 +147,7 @@ public class KAIMyEntityRegisterClient {
         }
 
         // ==== T: Webots 통계 출력 ====
-        if (keyWebotsStats.consumeClick()) {
+        if (KAIMyEntityRegisterClient.keyWebotsStats.consumeClick()) {
             try {
                 WebotsController.getInstance().printStats();
                 MC.gui.getChat().addMessage(Component.literal("§a[Webots] Stats printed to console"));
@@ -151,12 +157,12 @@ public class KAIMyEntityRegisterClient {
         }
 
         // ==== Y: Webots 테스트 자세 ====
-        if (keyWebotsTest.consumeClick()) {
+        if (KAIMyEntityRegisterClient.keyWebotsTest.consumeClick()) {
             testWebotsConnection(MC);
         }
 
-        // ✅ ==== U: Webots 설정 GUI ====
-        if (keyWebotsConfig.consumeClick()) {
+        // ==== U: Webots 설정 GUI ====
+        if (KAIMyEntityRegisterClient.keyWebotsConfig.consumeClick()) {
             MC.setScreen(new WebotsConfigScreen(MC.screen));
         }
     }
@@ -165,10 +171,10 @@ public class KAIMyEntityRegisterClient {
     private static void handleCustomAnim(LocalPlayer player) {
         var m = MMDModelManager.GetModel("EntityPlayer_" + player.getName().getString());
         if (m == null) return;
-        if (keyCustomAnim1.isDown()) sendAnim(player, 1);
-        if (keyCustomAnim2.isDown()) sendAnim(player, 2);
-        if (keyCustomAnim3.isDown()) sendAnim(player, 3);
-        if (keyCustomAnim4.isDown()) sendAnim(player, 4);
+        if (KAIMyEntityRegisterClient.keyCustomAnim1.isDown()) sendAnim(player, 1);
+        if (KAIMyEntityRegisterClient.keyCustomAnim2.isDown()) sendAnim(player, 2);
+        if (KAIMyEntityRegisterClient.keyCustomAnim3.isDown()) sendAnim(player, 3);
+        if (KAIMyEntityRegisterClient.keyCustomAnim4.isDown()) sendAnim(player, 4);
     }
 
     private static void sendAnim(LocalPlayer player, int index) {
