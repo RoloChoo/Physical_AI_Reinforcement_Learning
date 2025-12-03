@@ -1,7 +1,8 @@
+// common/src/main/java/com/kAIS/KAIMyEntity/urdf/control/MotionEditorScreen.java
 package com.kAIS.KAIMyEntity.urdf.control;
 
 import com.kAIS.KAIMyEntity.urdf.URDFModelOpenGLWithSTL;
-import com.kAIS.KAIMyEntity.webots.WebotsController; // ✅ 추가
+import com.kAIS.KAIMyEntity.webots.WebotsController; // ✅ 추가됨
 import net.minecraft.client.Minecraft;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -17,8 +18,7 @@ import static java.lang.Math.abs;
  * - UpperChest 매핑 문제 해결 (VSeeFace/VMagicMirror 완벽 호환)
  * 
  * ✅ 2025.11.21 Webots 연동 추가
- * - URDF 업데이트 후 자동으로 Webots로 전송
- * - 기존 로직 완전 보존
+ * - VMC 데이터가 URDF에 반영된 직후, 그 값을 그대로 Webots로 전송
  */
 public final class MotionEditorScreen {
     private MotionEditorScreen() {}
@@ -40,6 +40,9 @@ public final class MotionEditorScreen {
 
                 // ★★★ Chest 매핑 확장 (VSeeFace/VMagicMirror UpperChest 대응) ★★★
                 case "chest", "upperchest", "spine", "spine1", "spine2", "spine3", "torso", "upper_chest", "chest2" -> "Chest";
+                
+                // 머리 매핑 (혹시 몰라 추가)
+                case "head", "neck", "neck1", "neck2" -> "Head";
 
                 default -> original;
             };
@@ -67,17 +70,10 @@ final class VmcDrive {
     static void tick(URDFModelOpenGLWithSTL renderer) {
         var listener = VMCListenerController.VmcListener.getInstance();
         
-        // [핵심] getBones() 대신 getSnapshot() 사용
-        // 이 맵은 이 메서드가 실행되는 동안 절대 변하지 않음 (Atomic Reference)
+        // [핵심] Atomic Snapshot 사용
         Map<String, VMCListenerController.VmcListener.Transform> bones = listener.getSnapshot();
 
         if (bones.isEmpty()) return;
-
-        // ★ 디버깅용 로그 (Chest 매핑 확인) ★
-        System.out.println("[VMC] tick - Bones: " + bones.size() + 
-            " | Chest: " + bones.containsKey("Chest") +
-            " | LeftUA: " + bones.containsKey("LeftUpperArm") +
-            " | RightUA: " + bones.containsKey("RightUpperArm"));
 
         // 부모(Chest) 찾기
         VMCListenerController.VmcListener.Transform chest = bones.get("Chest");
@@ -85,16 +81,45 @@ final class VmcDrive {
         if (chest == null) chest = bones.get("Hips");
 
         if (chest == null) {
-            System.out.println("[VMC] ERROR: Chest bone not found! Available: " + bones.keySet());
+            // System.out.println("[VMC] ERROR: Chest bone not found! Available: " + bones.keySet());
             return;
         }
 
-        // ✅ 기존 로직: URDF 업데이트
+        // ✅ 기존 로직: 팔 데이터 계산 및 URDF 업데이트
         processArmQuaternion(renderer, bones, chest, true);  // 왼팔
         processArmQuaternion(renderer, bones, chest, false); // 오른팔
         
-        // ✅ 추가 로직: Webots 전송 (기존 로직에 영향 없음)
+        // ✅ 기존 로직 추가: 머리 데이터 처리 (Head)
+        processHeadQuaternion(renderer, bones, chest);
+
+        // ✅ 추가 로직: Webots 전송 (기존 로직 완전히 끝난 후 실행)
         sendToWebots(renderer);
+    }
+
+    private static void processHeadQuaternion(URDFModelOpenGLWithSTL renderer,
+                                              Map<String, VMCListenerController.VmcListener.Transform> bones,
+                                              VMCListenerController.VmcListener.Transform chest) {
+        // 머리 본 찾기
+        VMCListenerController.VmcListener.Transform head = bones.get("Head");
+        if (head == null) return;
+
+        // Chest(몸통) 기준으로 Head(머리)의 로컬 회전 계산
+        // Q_local = Q_parent^-1 * Q_child
+        Quaternionf parentRot = new Quaternionf(chest.rotation);
+        Quaternionf headRot = new Quaternionf(head.rotation);
+        Quaternionf localHead = new Quaternionf(parentRot).conjugate().mul(headRot);
+
+        Vector3f headEuler = new Vector3f();
+        localHead.getEulerAnglesXYZ(headEuler);
+
+        // URDF 모델에 적용 (WebotsController가 나중에 이 값을 읽어감)
+        // head_pan (좌우, Y축 회전)
+        renderer.setJointPreview("head_pan", headEuler.y);
+        renderer.setJointTarget("head_pan", headEuler.y);
+
+        // head_tilt (상하, X축 회전) - 좌표계에 따라 부호 확인 필요할 수 있음
+        renderer.setJointPreview("head_tilt", headEuler.x);
+        renderer.setJointTarget("head_tilt", headEuler.x);
     }
 
     private static void processArmQuaternion(URDFModelOpenGLWithSTL renderer,
@@ -108,9 +133,6 @@ final class VmcDrive {
         var lower = bones.get(lowerName);
 
         if (upper == null) return;
-
-        // [계산 로직] Atomic Snapshot 덕분에 parentBone과 upper는 같은 시간대의 데이터임이 보장됨.
-        // 따라서 World -> Local 변환(Q_rel = Q_parent^-1 * Q_child)이 정확하게 수행됨.
 
         // === 1. 어깨 관절 (Shoulder) 계산 ===
         Quaternionf parentRot = new Quaternionf(parentBone.rotation);
@@ -131,7 +153,7 @@ final class VmcDrive {
             localElbow.getEulerAnglesXYZ(elbowEuler);
         }
 
-        // === 3. URDF 적용 (기존 로직 유지) ===
+        // === 3. URDF 적용 ===
         String pitchJoint = isLeft ? "l_sho_pitch" : "r_sho_pitch";
         String rollJoint  = isLeft ? "l_sho_roll"  : "r_sho_roll";
         String elbowJoint = isLeft ? "l_el"        : "r_el";
@@ -149,34 +171,23 @@ final class VmcDrive {
         renderer.setJointTarget(elbowJoint, elbowAngle);
     }
     
-    // ✅ 새로운 메서드: Webots 전송 (기존 로직과 완전히 분리)
-    /**
-     * URDF의 모든 가동 관절을 Webots로 전송
-     * - 기존 VMC → URDF 로직에 영향 없음
-     * - WebotsController가 없으면 조용히 스킵
-     */
+    // ✅ Webots 전송 로직 (심플하게 URDF 상태를 그대로 전송)
     private static void sendToWebots(URDFModelOpenGLWithSTL renderer) {
-        try {
-            WebotsController webots = WebotsController.getInstance();
-            
-            // 연결 안 되어 있으면 스킵 (에러 없이 조용히 무시)
-            if (!webots.isConnected()) {
-                return;
+        // WebotsController가 연결되어 있을 때만 동작
+        WebotsController webots = WebotsController.getInstance();
+        if (!webots.isConnected()) return;
+
+        // 현재 URDF 모델의 모든 관절 값을 읽어서 Webots로 쏴줌
+        // (이미 processArmQuaternion 등에서 계산된 최신 값이 renderer에 들어있음)
+        var robot = renderer.getRobotModel();
+        if (robot == null || robot.joints == null) return;
+        
+        for (var joint : robot.joints) {
+            // 움직일 수 있는 관절만 전송 (고정 관절 제외)
+            if (joint.isMovable()) {
+                // WebotsController 내부에서 이름 매핑 및 좌표 변환을 알아서 처리함
+                webots.setJoint(joint.name, joint.currentPosition);
             }
-            
-            // URDF의 모든 가동 관절 전송
-            var robot = renderer.getRobotModel();
-            if (robot == null || robot.joints == null) return;
-            
-            for (var joint : robot.joints) {
-                if (joint.isMovable()) {
-                    webots.setJoint(joint.name, joint.currentPosition);
-                }
-            }
-            
-        } catch (Exception e) {
-            // WebotsController가 초기화되지 않았거나 기타 에러
-            // 조용히 무시 (VMC 기능에 영향 주지 않음)
         }
     }
 }
