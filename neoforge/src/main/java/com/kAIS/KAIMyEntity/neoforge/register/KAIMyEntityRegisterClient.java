@@ -84,8 +84,8 @@ public class KAIMyEntityRegisterClient {
     }
 }
 
-// === 키 입력 처리는 별도 클래스로 분리 (FORGE BUS) ===
-@EventBusSubscriber(modid = "kaimyentity", bus = EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
+// === 키 입력 처리는 별도 클래스로 분리 (NeoForge 버스) ===
+@EventBusSubscriber(modid = "kaimyentity", value = Dist.CLIENT)
 class KAIMyEntityKeyHandler {
     private static final Logger logger = LogManager.getLogger();
 
