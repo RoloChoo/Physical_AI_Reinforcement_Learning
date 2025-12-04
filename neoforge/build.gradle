@@ -15,6 +15,12 @@ configurations {
     developmentNeoForge.extendsFrom common
 }
 
+repositories {
+    // [수정됨] ODE4J를 다운로드하기 위해 Maven Central이 필요합니다.
+    mavenCentral() 
+    maven { url = 'https://maven.neoforged.net/releases' }
+}
+
 dependencies {
     neoForge "net.neoforged:neoforge:${rootProject.neoforge_version}"
     // Remove the next line if you don't want to depend on the API
@@ -22,10 +28,12 @@ dependencies {
 
     common(project(path: ":common", configuration: "namedElements")) { transitive false }
     shadowCommon(project(path: ":common", configuration: "transformProductionNeoForge")) { transitive = false }
-}
 
-repositories {
-    maven { url = 'https://maven.neoforged.net/releases' }
+    // [수정됨] ODE4J 라이브러리 추가
+    // implementation: 코드 작성 시 IDE에서 인식하기 위함
+    // shadowCommon: 빌드된 jar 파일 안에 라이브러리를 포함시키기 위함 (Architectury 설정에 따름)
+    implementation 'org.ode4j:ode4j:0.4.2'
+    shadowCommon 'org.ode4j:ode4j:0.4.2'
 }
 
 processResources {
@@ -43,6 +51,11 @@ shadowJar {
 
     configurations = [project.configurations.shadowCommon]
     archiveClassifier = "dev-shadow"
+
+    // [수정됨] 패키지 재배치 (Relocation)
+    // 다른 모드도 ODE4J를 사용할 경우 충돌이 날 수 있으므로, 내 모드 패키지 안으로 숨깁니다.
+    // 예: org.ode4j -> com.kAIS.KAIMyEntity.lib.ode4j
+    relocate 'org.ode4j', 'com.kAIS.KAIMyEntity.lib.ode4j'
 }
 
 remapJar {
